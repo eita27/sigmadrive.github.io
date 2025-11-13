@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SimpleDrive — Client-side File Drive (Demo)</title>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--muted:#98a0b3;--accent:#6ee7b7;--danger:#ff7b7b}
+    *{box-sizing:border-box;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial}
+    body{margin:0;background:linear-gradient(180deg,#061022 0%, #071427 100%);color:#e6eef8}
+    header{padding:18px 24px;display:flex;align-items:center;gap:16px;border-bottom:1px solid rgba(255,255,255,0.03)}
+    header h1{font-size:18px;margin:0}
+    .container{max-width:1100px;margin:28px auto;padding:18px}
+
+    .grid{display:grid;grid-template-columns:320px 1fr;gap:18px}
+
+    /* left panel */
+    .panel{background:var(--card);border-radius:12px;padding:14px;box-shadow:0 6px 18px rgba(2,6,23,0.6)}
+    .upload-area{border:2px dashed rgba(255,255,255,0.04);padding:16px;border-radius:8px;text-align:center;cursor:pointer}
+    .upload-area.dragging{background:linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-color:var(--accent)}
+    .btn{display:inline-block;padding:8px 12px;border-radius:8px;background:linear-gradient(90deg,#0ea5a9,#6ee7b7);color:#022;cursor:pointer;text-decoration:none}
+
+    /* right panel */
+    .search{display:flex;gap:8px;margin-bottom:12px}
+    input[type=search]{flex:1;padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:inherit}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:10px;text-align:left;border-bottom:1px solid rgba(255,255,255,0.03);font-size:14px}
+    tr:hover td{background:linear-gradient(90deg,rgba(255,255,255,0.01),transparent)}
+    .meta{color:var(--muted);font-size:12px}
+    .actions button{margin-right:6px;padding:6px 8px;border-radius:8px;border:none;cursor:pointer}
+    .actions .download{background:#0f1724;color:var(--accent)}
+    .actions .delete{background:transparent;color:var(--danger);border:1px solid rgba(255,255,255,0.03)}
+    .actions .share{background:transparent;color:var(--accent);border:1px solid rgba(255,255,255,0.03)}
+
+    footer{margin-top:18px;color:var(--muted);font-size:13px}
+
+    @media (max-width:880px){.grid{grid-template-columns:1fr}.panel{padding:12px}}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>SimpleDrive — client-only demo</h1>
+    <nav style="margin-left:auto;color:var(--muted);font-size:13px">No server required — exports allow manual sharing</nav>
+  </header>
+
+  <main class="container">
+    <div class="grid">
+      <aside class="panel">
+        <h3>Upload & Import</h3>
+        <div id="drop" class="upload-area" tabindex="0">
+          <p><strong>Drag & drop files here</strong> or click to choose</p>
+          <p class="meta">Files are stored locally in your browser (IndexedDB). Use the Share export to give files to others.</p>
+          <input id="fileInput" type="file" multiple style="display:none" />
+        </div>
+
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+          <button id="exportAll" class="btn">Export All (.zip-ish .json)</button>
+          <label class="btn" style="background:transparent;color:var(--accent);border:1px solid rgba(255,255,255,0.03);cursor:pointer">
+            <input id="importShare" type="file" accept="application/json" style="display:none"> Import .share
+          </label>
+        </div>
+
+        <hr style="opacity:.06;margin:12px 0">
+        <h4>Info</h4>
+        <p class="meta">Limitations: This demo stores files locally. To truly share across devices you'd need a backend (server / cloud) to upload files and manage permissions. Use the share export to transfer files manually by sending the exported file.</p>
+      </aside>
+
+      <section class="panel">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <h3 style="margin:0">My Files</h3>
+          <div class="search" style="width:60%">
+            <input id="q" type="search" placeholder="Search by name or type...">
+            <button id="refresh" class="btn" style="padding:6px 10px">Refresh</button>
+          </div>
+        </div>
+
+        <div style="margin-top:12px;overflow:auto;max-height:520px">
+          <table id="fileTable">
+            <thead>
+              <tr><th>Name</th><th>Size</th><th>Type</th><th>Uploaded</th><th>Actions</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <footer>
+          <p>Tip: Use Export on a file to create a .share file that another person can Import to add the file to their SimpleDrive.</p>
+        </footer>
+      </section>
+    </div>
+  </main>
+
+  <script>
+  // Simple IndexedDB wrapper (promisified)
+  const DB_NAME = 'simple-drive-db';
+  const STORE = 'files';
+  function openDB(){
+    return new Promise((res,rej)=>{
+      const r = indexedDB.open(DB_NAME,1);
+      r.onupgradeneeded = e => {
+        const db = e.target.result;
+        if(!db.objectStoreNames.contains(STORE)){
+          const s = db.createObjectStore(STORE, { keyPath: 'id' });
+          s.createIndex('name','name',{unique:false});
+          s.createIndex('type','type',{unique:false});
+        }
+      }
+      r.onsuccess = e => res(e.target.result);
+      r.onerror = e => rej(e.target.error);
+    });
+  }
+  async function addFileRecord(record){
+    const db = await openDB();
+    return new Promise((res,rej)=>{
+      const tx = db.transaction(STORE,'readwrite');
+      const store = tx.objectStore(STORE);
+      const req = store.add(record);
+      req.onsuccess = ()=>res(record.id);
+      req.onerror = e=>rej(e.target.error);
+    });
+  }
+  async function getAllFiles(){
+    const db = await openDB();
+    return new Promise((res,rej)=>{
+      const tx = db.transaction(STORE,'readonly');
+      const store = tx.objectStore(STORE);
+      const req = store.getAll();
+      req.onsuccess = e=>res(e.target.result);
+      req.onerror = e=>rej(e.target.error);
+    });
+  }
+  async function getFile(id){
+    const db = await openDB();
+    return new Promise((res,rej)=>{
+      const tx = db.transaction(STORE,'readonly');
+      const store = tx.objectStore(STORE);
+      const req = store.get(id);
+      req.onsuccess = e=>res(e.target.result);
+      req.onerror = e=>rej(e.target.error);
+    });
+  }
+  async function deleteFile(id){
+    const db = await openDB();
+    return new Promise((res,rej)=>{
+      const tx = db.transaction(STORE,'readwrite');
+      const store = tx.objectStore(STORE);
+      const req = store.delete(id);
+      req.onsuccess = ()=>res();
+      req.onerror = e=>rej(e.target.error);
+    });
+  }
+
+  // Utilities
+  function uid(){return 'f_'+Math.random().toString(36).slice(2,9)+'_'+Date.now()}
+  function fmtBytes(bytes){if(bytes<1024) return bytes+' B'; if(bytes<1024*1024) return (bytes/1024).toFixed(1)+' KB'; return (bytes/1024/1024).toFixed(2)+' MB'}
+
+  // UI elements
+  const drop = document.getElementById('drop');
+  const fileInput = document.getElementById('fileInput');
+  const tbody = document.querySelector('#fileTable tbody');
+  const q = document.getElementById('q');
+  const refresh = document.getElementById('refresh');
+  const exportAll = document.getElementById('exportAll');
+  const importShare = document.getElementById('importShare');
+
+  // Handle clicks to open file chooser
+  drop.addEventListener('click', ()=>fileInput.click());
+  fileInput.addEventListener('change', async e=>{
+    const files = Array.from(e.target.files);
+    await handleFiles(files);
+    fileInput.value = '';
+  });
+
+  // Drag-n-drop UX
+  ['dragenter','dragover'].forEach(evt=>{
+    drop.addEventListener(evt, e=>{e.preventDefault();drop.classList.add('dragging')});
+  });
+  ['dragleave','drop'].forEach(evt=>{
+    drop.addEventListener(evt, e=>{e.preventDefault();drop.classList.remove('dragging')});
+  });
+  drop.addEventListener('drop', async e=>{
+    const dt = e.dataTransfer; if(!dt) return;
+    const files = Array.from(dt.files);
+    await handleFiles(files);
+  });
+
+  // Process files: read as ArrayBuffer then store with metadata
+  async function handleFiles(files){
+    for(const f of files){
+      const arr = await f.arrayBuffer();
+      const id = uid();
+      const record = {
+        id,
+        name: f.name,
+        type: f.type || 'application/octet-stream',
+        size: f.size,
+        uploadedAt: new Date().toISOString(),
+        data: arr // store ArrayBuffer directly in IndexedDB
+      };
+      try{ await addFileRecord(record); console.log('saved', f.name); }
+      catch(err){ console.error('save err',err); alert('Failed to save '+f.name); }
+    }
+    await refreshTable();
+  }
+
+  // Render table
+  async function refreshTable(){
+    const list = await getAllFiles();
+    const filter = (q.value||'').toLowerCase();
+    tbody.innerHTML = '';
+    const filtered = list.filter(it=> (it.name||'').toLowerCase().includes(filter) || (it.type||'').toLowerCase().includes(filter));
+    if(filtered.length===0){
+      tbody.innerHTML = '<tr><td colspan="5" class="meta">No files yet — upload some above.</td></tr>';
+      return;
+    }
+    for(const f of filtered.sort((a,b)=>b.uploadedAt.localeCompare(a.uploadedAt))){
+      const tr = document.createElement('tr');
+      const nameTd = document.createElement('td');
+      nameTd.innerHTML = `<div style="font-weight:600">${escapeHtml(f.name)}</div><div class="meta">id: ${f.id}</div>`;
+      const sizeTd = document.createElement('td'); sizeTd.textContent = fmtBytes(f.size);
+      const typeTd = document.createElement('td'); typeTd.textContent = f.type || '-';
+      const uploadedTd = document.createElement('td'); uploadedTd.textContent = new Date(f.uploadedAt).toLocaleString();
+      const actionsTd = document.createElement('td'); actionsTd.className='actions';
+
+      const dBtn = document.createElement('button'); dBtn.className='download'; dBtn.textContent='Download';
+      dBtn.onclick = ()=>downloadFile(f.id);
+      const sBtn = document.createElement('button'); sBtn.className='share'; sBtn.textContent='Export .share';
+      sBtn.onclick = ()=>exportShareFile(f.id);
+      const delBtn = document.createElement('button'); delBtn.className='delete'; delBtn.textContent='Delete';
+      delBtn.onclick = async ()=>{ if(confirm('Delete '+f.name+'?')){ await deleteFile(f.id); await refreshTable(); }};
+
+      actionsTd.appendChild(dBtn); actionsTd.appendChild(sBtn); actionsTd.appendChild(delBtn);
+
+      tr.appendChild(nameTd); tr.appendChild(sizeTd); tr.appendChild(typeTd); tr.appendChild(uploadedTd); tr.appendChild(actionsTd);
+      tbody.appendChild(tr);
+    }
+  }
+
+  function escapeHtml(s){ return s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;') }
+
+  // Download a file by creating a blob URL
+  async function downloadFile(id){
+    const rec = await getFile(id);
+    if(!rec) return alert('File not found');
+    const ab = rec.data;
+    const blob = new Blob([ab], {type: rec.type});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = rec.name; document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // Export a single .share JSON file that contains base64 data and metadata
+  async function exportShareFile(id){
+    const rec = await getFile(id);
+    if(!rec) return alert('File not found');
+    // convert ArrayBuffer to base64
+    const b64 = arrayBufferToBase64(rec.data);
+    const payload = {
+      version:1,
+      exportedAt: new Date().toISOString(),
+      file: {
+        id: rec.id,
+        name: rec.name,
+        type: rec.type,
+        size: rec.size,
+        uploadedAt: rec.uploadedAt,
+        dataBase64: b64
+      }
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${rec.name}.share.json`; document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // Export all files as a single JSON (not a real zip). Useful for backup.
+  exportAll.addEventListener('click', async ()=>{
+    const all = await getAllFiles();
+    const out = {version:1, exportedAt:new Date().toISOString(), files:[]};
+    for(const r of all){ out.files.push({id:r.id,name:r.name,type:r.type,size:r.size,uploadedAt:r.uploadedAt,dataBase64:arrayBufferToBase64(r.data)}); }
+    const blob = new Blob([JSON.stringify(out,null,2)], {type:'application/json'});
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `simpledrive_backup_${Date.now()}.json`; document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(a.href);
+  });
+
+  // Import .share file (single file JSON) or backup
+  importShare.addEventListener('change', async e=>{
+    const f = e.target.files[0]; if(!f) return; try{
+      const txt = await f.text(); const parsed = JSON.parse(txt);
+      if(parsed.file){ // single .share
+        const fileObj = parsed.file;
+        const ab = base64ToArrayBuffer(fileObj.dataBase64);
+        const rec = {id: uid(), name:fileObj.name, type:fileObj.type, size:fileObj.size, uploadedAt:new Date().toISOString(), data:ab};
+        await addFileRecord(rec); alert('Imported '+fileObj.name); await refreshTable();
+      } else if(parsed.files){ // full backup
+        for(const fileObj of parsed.files){ const ab = base64ToArrayBuffer(fileObj.dataBase64); const rec = {id:uid(), name:fileObj.name, type:fileObj.type, size:fileObj.size, uploadedAt:new Date().toISOString(), data:ab}; await addFileRecord(rec); }
+        alert('Backup imported: '+parsed.files.length+' files'); await refreshTable();
+      } else alert('Unrecognized share file');
+    } catch(err){ console.error(err); alert('Failed to import: '+err.message) }
+    e.target.value='';
+  });
+
+  // helpers: ArrayBuffer <-> Base64
+  function arrayBufferToBase64(buffer){
+    let binary=''; const bytes=new Uint8Array(buffer); const len=bytes.byteLength; for(let i=0;i<len;i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+  function base64ToArrayBuffer(base64){
+    const binary = atob(base64); const len = binary.length; const bytes = new Uint8Array(len); for(let i=0;i<len;i++) bytes[i]=binary.charCodeAt(i); return bytes.buffer;
+  }
+
+  // Search and refresh hooks
+  q.addEventListener('input', ()=>refreshTable());
+  refresh.addEventListener('click', ()=>refreshTable());
+
+  // initial load
+  refreshTable();
+
+  // small note helper: alert user about limits on very large files
+  fileInput.addEventListener('change', ()=>{
+    const f = fileInput.files && fileInput.files[0]; if(!f) return; if(f.size>50*1024*1024) alert('Warning: large file. Browsers may fail to store files larger than available disk quota. For production use a server/back-end.');
+  });
+
+  // convert File to ArrayBuffer on input (support multiple)
+  async function readFileAsArrayBuffer(file){ return await file.arrayBuffer(); }
+
+  // Workaround: some browsers may not persist ArrayBuffer properly; storing as Blob could be used instead.
+
+  </script>
+</body>
+</html>
